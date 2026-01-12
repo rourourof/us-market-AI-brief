@@ -1,27 +1,24 @@
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 # =====================
-# 基本設定
+# ENV
 # =====================
-WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL")
-OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
-
-if not WEBHOOK:
-    raise RuntimeError("DISCORD_WEBHOOK_URL not set")
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
 JST = pytz.timezone("Asia/Tokyo")
 now = datetime.now(JST)
 hour = now.hour
-
 MODE = "EVENING" if hour >= 17 else "MORNING"
 
 # =====================
-# AI生成（失敗しても落ちない）
+# OpenAI
 # =====================
-def ai_generate(prompt):
+def ai(text):
     if not OPENAI_KEY:
         return None
     try:
@@ -30,84 +27,98 @@ def ai_generate(prompt):
         res = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "あなたはプロの米国株市場アナリストです。"},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "あなたは米国株と半導体専門の市場アナリストです。"},
+                {"role": "user", "content": text}
             ],
-            temperature=0.4
+            temperature=0.35
         )
         return res.choices[0].message.content
-    except Exception:
+    except:
         return None
 
 # =====================
-# 本文生成
+# News
 # =====================
-def build_message():
-    header = f"━━━━━━━━━━━━━━━━━━\n"
-    header += f"【{'18:00 NVIDIA / 半導体 シナリオ' if MODE=='EVENING' else '6:00 米国株 市場レビュー'}】\n"
-    header += f"（米国株 / 半導体・NVDA 同比重）\n"
-    header += f"━━━━━━━━━━━━━━━━━━\n\n"
+def get_news():
+    if not NEWS_API_KEY:
+        return "・重要ニュースなし（API未設定）"
+    url = "https://newsapi.org/v2/top-headlines"
+    params = {
+        "q": "NVIDIA OR semiconductor OR Federal Reserve",
+        "language": "en",
+        "apiKey": NEWS_API_KEY,
+        "pageSize": 5
+    }
+    r = requests.get(url, params=params).json()
+    lines = []
+    for a in r.get("articles", []):
+        lines.append(f"・{a['title']}")
+    return "\n".join(lines) if lines else "・目立ったニュースなし"
+
+# =====================
+# Market Data（簡易）
+# =====================
+def market_snapshot():
+    # 実運用では yfinance 等に差し替え可能
+    return {
+        "NVDA": "方向感なし（レンジ）",
+        "SOX": "高値圏維持",
+        "NASDAQ": "押し目買い優勢"
+    }
+
+# =====================
+# Main Message
+# =====================
+def build_text():
+    news = get_news()
+    market = market_snapshot()
 
     if MODE == "EVENING":
-        prompt = """
-米国株・半導体・NVIDIAについて、
-本日の値動きを踏まえた18:00時点のテクニカルシナリオを作成してください。
+        prompt = f"""
+以下を満たす18:00用シナリオを作成：
 
-条件：
-- NVIDIAと半導体セクターを同じ比重
-- 出来高・ブレイク有無・調整判断
-- 上下2シナリオ
-- 読了5分以上
+・NVDAと半導体を同比重
+・テクニカル中心（出来高、ブレイク）
+・2シナリオ（上/下）
+・ニュースと政治要因も反映
+
+ニュース：
+{news}
+
+市場状況：
+{market}
 """
-        body = ai_generate(prompt) or """
-【NVDA・半導体 テクニカル概況】
-・指数・個別ともに明確なブレイクは確認されず
-・出来高は平均水準で様子見
-
-【NVDA シナリオ】
-・上：高値更新＋出来高増 → モメンタム再点火
-・下：支持線割れ → 調整継続
-
-【半導体セクター】
-・SOXはレンジ継続、主導銘柄不在
-"""
-
     else:
-        prompt = """
-前日の米国株市場について以下を含めたレビューを作成してください。
+        prompt = f"""
+以下を満たす6:00用レビューを作成：
 
-- 前日のニュースと株価への影響
-- NVIDIAと半導体の実際の値動き
-- 政治・政治家発言の影響
-- 過去1週間でトレンドを作った材料
-- テクニカル視点での検証
-- 読了10分想定
-"""
-        body = ai_generate(prompt) or """
-【前日の影響評価】
-・材料は限定的でテクニカル主導
+・前日の値動き検証
+・NVDA / 半導体の答え合わせ
+・ニュースが効いたか
+・政治・発言の影響
+・10分想定
 
-【ニュース（最新）】
-・大きなサプライズなし
+ニュース：
+{news}
 
-【1週間のトレンド要因】
-・金利見通しとAI投資期待
-
-【NVDA / 半導体の検証】
-・指数比でNVDAは堅調
-・SOXは調整局面
-
-【政治】
-・FRB関連発言は市場に織り込み済み
+市場状況：
+{market}
 """
 
-    footer = f"\n━━━━━━━━━━━━━━━━━━\n"
-    footer += f"配信時刻：{now.strftime('%Y-%m-%d %H:%M JST')}\n"
-    footer += "※ 自動生成 / 投資助言ではありません"
-
-    return header + body + footer
+    return ai(prompt) or "AI生成失敗（フォールバック）"
 
 # =====================
-# Discord送信
+# Discord Embed
 # =====================
-requests.post(WEBHOOK, json={"content": build_message()})
+def send():
+    content = build_text()
+    embed = {
+        "title": "🇺🇸 米国株 / 半導体マーケット",
+        "description": content[:3900],
+        "footer": {
+            "text": f"{now.strftime('%Y-%m-%d %H:%M JST')}｜自動生成・投資助言ではありません"
+        }
+    }
+    requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]})
+
+send()
