@@ -1,124 +1,167 @@
 import os
 import requests
-from datetime import datetime, timedelta
-import pytz
+import datetime
+import traceback
 
-# =====================
-# ENV
-# =====================
+import yfinance as yf
+from openai import OpenAI
+
+# =========================
+# 環境変数
+# =========================
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-JST = pytz.timezone("Asia/Tokyo")
-now = datetime.now(JST)
-hour = now.hour
-MODE = "EVENING" if hour >= 17 else "MORNING"
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# =====================
-# OpenAI
-# =====================
-def ai(text):
-    if not OPENAI_KEY:
-        return None
+# =========================
+# ユーティリティ
+# =========================
+def now_jst():
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+
+def safe_float(v):
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=OPENAI_KEY)
-        res = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "あなたは米国株と半導体専門の市場アナリストです。"},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.35
-        )
-        return res.choices[0].message.content
+        return float(v)
     except:
         return None
 
-# =====================
-# News
-# =====================
-def get_news():
-    if not NEWS_API_KEY:
-        return "・重要ニュースなし（API未設定）"
-    url = "https://newsapi.org/v2/top-headlines"
-    params = {
-        "q": "NVIDIA OR semiconductor OR Federal Reserve",
-        "language": "en",
-        "apiKey": NEWS_API_KEY,
-        "pageSize": 5
-    }
-    r = requests.get(url, params=params).json()
-    lines = []
-    for a in r.get("articles", []):
-        lines.append(f"・{a['title']}")
-    return "\n".join(lines) if lines else "・目立ったニュースなし"
+# =========================
+# マーケットデータ取得
+# =========================
+def fetch_market(ticker):
+    df = yf.download(ticker, period="2mo", interval="1d", progress=False)
+    if len(df) < 2:
+        return None
 
-# =====================
-# Market Data（簡易）
-# =====================
-def market_snapshot():
-    # 実運用では yfinance 等に差し替え可能
+    cur = df.iloc[-1]
+    prev = df.iloc[-2]
+
     return {
-        "NVDA": "方向感なし（レンジ）",
-        "SOX": "高値圏維持",
-        "NASDAQ": "押し目買い優勢"
+        "ticker": ticker,
+        "close": safe_float(cur["Close"]),
+        "change_pct": safe_float((cur["Close"] / prev["Close"] - 1) * 100),
+        "high": safe_float(cur["High"]),
+        "low": safe_float(cur["Low"]),
+        "prev_high": safe_float(prev["High"]),
+        "prev_low": safe_float(prev["Low"]),
+        "volume": int(cur["Volume"]),
+        "avg_volume_20": int(df["Volume"].tail(20).mean())
     }
 
-# =====================
-# Main Message
-# =====================
-def build_text():
-    news = get_news()
-    market = market_snapshot()
+# =========================
+# テクニカル判定
+# =========================
+def tech_comment(d):
+    if d["high"] > d["prev_high"] and d["volume"] > d["avg_volume_20"]:
+        return "出来高を伴う上方ブレイク"
+    if d["low"] < d["prev_low"] and d["volume"] > d["avg_volume_20"]:
+        return "出来高を伴う下方ブレイク"
+    return "明確なブレイクなし"
 
-    if MODE == "EVENING":
-        prompt = f"""
-以下を満たす18:00用シナリオを作成：
+# =========================
+# AI生成（フォールバック付き）
+# =========================
+def ai_generate(prompt, fallback):
+    try:
+        res = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": "あなたは米国株と半導体市場を分析する専門家です。"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.4
+        )
+        return res.choices[0].message.content.strip()
+    except Exception:
+        return fallback
 
-・NVDAと半導体を同比重
-・テクニカル中心（出来高、ブレイク）
-・2シナリオ（上/下）
-・ニュースと政治要因も反映
+# =========================
+# 18:00 NVIDIA + 半導体シナリオ
+# =========================
+def evening_scenario(nvda, sox):
+    prompt = f"""
+以下は本日の米国株データです。
 
-ニュース：
-{news}
+【NVDA】
+終値: {nvda['close']}
+前日比: {nvda['change_pct']:.2f}%
+テクニカル: {tech_comment(nvda)}
 
-市場状況：
-{market}
+【SOX】
+前日比: {sox['change_pct']:.2f}%
+テクニカル: {tech_comment(sox)}
+
+18:00時点の想定として、
+・NVDAと半導体全体を同じ比重で
+・ニュース、需給、テクニカルを整理
+・10分程度で読める分析文
+を日本語で作成してください。
 """
-    else:
-        prompt = f"""
-以下を満たす6:00用レビューを作成：
 
-・前日の値動き検証
-・NVDA / 半導体の答え合わせ
-・ニュースが効いたか
-・政治・発言の影響
-・10分想定
+    fallback = f"""
+NVDAと半導体指数はいずれも明確なトレンドブレイクは見られず、
+短期的には方向感待ちの局面。
 
-ニュース：
-{news}
-
-市場状況：
-{market}
+NVDAは個別材料待ち、半導体全体も指数主導のレンジ推移が続いている。
+18:00時点では無理なポジション構築より、出来高変化と
+上限・下限の攻防を見極めるフェーズ。
 """
 
-    return ai(prompt) or "AI生成失敗（フォールバック）"
+    return ai_generate(prompt, fallback)
 
-# =====================
-# Discord Embed
-# =====================
-def send():
-    content = build_text()
-    embed = {
-        "title": "🇺🇸 米国株 / 半導体マーケット",
-        "description": content[:3900],
-        "footer": {
-            "text": f"{now.strftime('%Y-%m-%d %H:%M JST')}｜自動生成・投資助言ではありません"
-        }
-    }
-    requests.post(DISCORD_WEBHOOK, json={"embeds": [embed]})
+# =========================
+# メッセージ構築
+# =========================
+def build_message():
+    nvda = fetch_market("NVDA")
+    sox = fetch_market("^SOX")
+    nas = fetch_market("^IXIC")
 
-send()
+    now = now_jst().strftime("%Y-%m-%d %H:%M JST")
+
+    scenario = evening_scenario(nvda, sox)
+
+    return f"""
+━━━━━━━━━━━━━━━━━━
+【18:00 米国株・半導体レビュー】
+━━━━━━━━━━━━━━━━━━
+
+【指数動向】
+NASDAQ: {nas['change_pct']:.2f}%
+
+【NVDA】
+終値: {nvda['close']}
+前日比: {nvda['change_pct']:.2f}%
+テクニカル: {tech_comment(nvda)}
+
+【半導体（SOX）】
+前日比: {sox['change_pct']:.2f}%
+テクニカル: {tech_comment(sox)}
+
+━━━━━━━━━━━━━━━━━━
+【18:00 シナリオ（NVDA × 半導体）】
+━━━━━━━━━━━━━━━━━━
+{scenario}
+
+━━━━━━━━━━━━━━━━━━
+配信時刻：{now}
+※ 自動生成 / 投資助言ではありません
+"""
+
+# =========================
+# Discord送信
+# =========================
+def send_discord(msg):
+    payload = {"content": msg}
+    requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+
+# =========================
+# 実行
+# =========================
+if __name__ == "__main__":
+    try:
+        message = build_message()
+        send_discord(message)
+    except Exception:
+        send_discord("❌ 市場レビュー生成中にエラーが発生しました。\n" + traceback.format_exc())
