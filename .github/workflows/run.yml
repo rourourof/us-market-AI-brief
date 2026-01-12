@@ -3,8 +3,10 @@ name: US Market Brief
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 21 * * 0-5"   # JST 6:00（前日21:00 UTC）
-    - cron: "0 9 * * 1-5"    # JST 18:00（9:00 UTC）
+    # JST 6:00 = UTC 21:00（前日）
+    - cron: "0 21 * * 0-5"
+    # JST 18:00 = UTC 9:00
+    - cron: "0 9 * * 1-5"
 
 jobs:
   run:
@@ -12,17 +14,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install
         run: |
-          pip install requests
+          pip install requests openai pytz
 
-      - name: Run script
+      - name: Run
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python us_market_brief.py
