@@ -1,4 +1,3 @@
-yfinance
 requests
 openai
-feedparser
+python-dotenv
