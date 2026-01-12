@@ -2,9 +2,9 @@ name: US Market AI Brief
 
 on:
   schedule:
-    # 6:00 JST（前日レビュー）
+    # 6:00 JST（前日レビュー）※月〜金
     - cron: '0 21 * * 0-4'
-    # 18:00 JST（NVDAシナリオ）
+    # 18:00 JST（シナリオ）※月〜金
     - cron: '0 9 * * 1-5'
   workflow_dispatch:
 
@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run market brief
+      - name: Run Market AI Brief
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
