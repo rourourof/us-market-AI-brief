@@ -1,0 +1,28 @@
+name: US Market Brief
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 21 * * 0-5"   # JST 6:00（前日21:00 UTC）
+    - cron: "0 9 * * 1-5"    # JST 18:00（9:00 UTC）
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Run script
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python us_market_brief.py
