@@ -1,21 +1,27 @@
 import os
-import requests
 import datetime
+import requests
 import yfinance as yf
+import feedparser
 
-# ========= 環境変数 =========
+# =====================
+# 環境変数
+# =====================
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# ========= 時刻判定 =========
+# =====================
+# 時刻・モード判定
+# =====================
 now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
 hour = now.hour
-
 MODE = "MORNING" if hour < 12 else "EVENING"
 
-# ========= データ取得 =========
+# =====================
+# 株価データ取得
+# =====================
 def get_price(ticker):
-    df = yf.download(ticker, period="7d", interval="1d", progress=False)
+    df = yf.download(ticker, period="10d", interval="1d", progress=False)
     cur = df.iloc[-1]
     prev = df.iloc[-2]
 
@@ -34,16 +40,41 @@ nvda = get_price("NVDA")
 sox = get_price("^SOX")
 nasdaq = get_price("^IXIC")
 
-# ========= テクニカル判定 =========
-def technical_comment(d):
+# =====================
+# テクニカル分析（説明付き）
+# =====================
+def technical_analysis(name, d):
+    text = f"{name}は終値{d['close']:.2f}（前日比 {d['change_pct']:.2f}%）。"
     if d["volume"] > d["avg_volume"] and d["high"] > d["prev_high"]:
-        return "出来高を伴う上方ブレイク"
-    if d["volume"] > d["avg_volume"] and d["low"] < d["prev_low"]:
-        return "出来高を伴う下方ブレイク"
-    return "方向感待ちの調整局面"
+        text += "出来高を伴って前日高値を上抜けており、短期的にはブレイク局面。"
+    elif d["volume"] > d["avg_volume"] and d["low"] < d["prev_low"]:
+        text += "出来高を伴う下押しで、調整圧力が強まった形。"
+    else:
+        text += "出来高は平均的で、重要価格帯での様子見・調整局面。"
+    return text
 
-# ========= AI生成（フォールバック付き） =========
-def ai_text(prompt, fallback):
+# =====================
+# ニュース取得（RSS）
+# =====================
+def fetch_news():
+    urls = [
+        "https://finance.yahoo.com/rss/headline?s=NVDA",
+        "https://finance.yahoo.com/rss/industry?s=semiconductors",
+        "https://finance.yahoo.com/rss/politics"
+    ]
+    headlines = []
+    for url in urls:
+        feed = feedparser.parse(url)
+        for e in feed.entries[:3]:
+            headlines.append(e.title)
+    return headlines
+
+news_list = fetch_news()
+
+# =====================
+# AI生成（失敗時フォールバック）
+# =====================
+def ai_generate(prompt, fallback):
     if not OPENAI_API_KEY:
         return fallback
     try:
@@ -52,13 +83,15 @@ def ai_text(prompt, fallback):
         res = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=600
+            max_tokens=700
         )
         return res.choices[0].message.content
     except Exception:
         return fallback
 
-# ========= 本文生成 =========
+# =====================
+# 本文生成
+# =====================
 def build_message():
     header = f"""━━━━━━━━━━━━━━━━━━
 【米国株 市場レビュー】{'6:00' if MODE=='MORNING' else '18:00'} JST
@@ -66,58 +99,47 @@ def build_message():
 ━━━━━━━━━━━━━━━━━━
 """
 
-    news = """【ニュース｜前日の影響評価】
-・直近の材料は限定的だが、金利・AI関連期待は継続
-・材料難の中、テクニカル主導の値動き
+    news_block = "【ニュース｜最新・影響評価】\n"
+    for n in news_list:
+        news_block += f"・{n}\n"
 
-【ニュース｜最新（速報）】
-・目立ったマーケットブレイク要因はなし
+    ai_news = ai_generate(
+        f"以下のニュースが米国株、特に半導体とNVDAに与える影響を分析してください:\n{news_list}",
+        "・ニュースはあるが、市場は織り込み済みで反応は限定的。"
+    )
 
-【トレンドを形成している大きな材料（過去1週間）】
-・AI投資継続期待
-・米金利の高止まり警戒
-"""
+    tech_block = f"""
+【NVDA テクニカル】
+{technical_analysis("NVDA", nvda)}
 
-    politics = """【米国政治・政治家発言】
-・FRB高官発言はインフレ警戒を維持
-・金融政策は依然として株式の上値を抑制
-"""
-
-    nvda_block = f"""【NVDA 個別動向】
-終値: {nvda['close']:.2f}
-前日比: {nvda['change_pct']:.2f}%
-テクニカル: {technical_comment(nvda)}
-"""
-
-    semi = f"""【半導体セクター全体】
-SOX 前日比: {sox['change_pct']:.2f}%
-NASDAQ 前日比: {nasdaq['change_pct']:.2f}%
-・半導体は指数と同程度の強弱
-・物色集中はNVDA中心
+【半導体セクター】
+{technical_analysis("SOX指数", sox)}
+NASDAQとの比較では半導体は{'アウトパフォーム' if sox['change_pct'] > nasdaq['change_pct'] else '指数並み〜アンダーパフォーム'}。
 """
 
     scenario = ""
     if MODE == "EVENING":
-        scenario = ai_text(
-            "NVDAと半導体市場の翌営業日に向けたテクニカルシナリオを専門家視点で詳しく。",
-            "【NVDA シナリオ】\n・方向感待ち。重要価格帯での攻防を想定。"
+        scenario = ai_generate(
+            "NVDAと半導体指数の翌営業日に向けたテクニカルシナリオを3パターンで。",
+            "・上：出来高増で続伸\n・横：レンジ継続\n・下：利益確定売り"
         )
-        scenario = f"\n【18:00 NVDA テクニカルシナリオ】\n{scenario}\n"
+        scenario = f"\n【18:00 NVDA シナリオ】\n{scenario}\n"
 
     if MODE == "MORNING":
-        scenario = ai_text(
-            "前日のNVDAと半導体市場の値動きをニュースとテクニカルの観点から振り返って。",
-            "【検証】\n・材料よりも需給・テクニカル主導の一日。"
+        scenario = ai_generate(
+            "前日のNVDAと半導体の値動きをニュースとテクニカルから検証してください。",
+            "・材料よりも需給主導の一日。"
         )
-        scenario = f"\n【検証｜答え合わせ】\n{scenario}\n"
+        scenario = f"\n【検証｜前日答え合わせ】\n{scenario}\n"
 
     footer = f"""━━━━━━━━━━━━━━━━━━
 配信時刻：{now.strftime('%Y-%m-%d %H:%M')} JST
 ※ 自動生成 / 投資助言ではありません
 """
 
-    return header + news + politics + nvda_block + semi + scenario + footer
+    return header + news_block + ai_news + tech_block + scenario + footer
 
-# ========= Discord送信 =========
-payload = {"content": build_message()}
-requests.post(DISCORD_WEBHOOK_URL, json=payload)
+# =====================
+# Discord送信
+# =====================
+requests.post(DISCORD_WEBHOOK_URL, json={"content": build_message()})
